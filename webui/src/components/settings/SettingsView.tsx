@@ -6417,7 +6417,7 @@ function RuntimeSettings({
         </SettingsGroup>
       </section>
 
-      <DreamSection settings={settings} token={token} onUpdate={applyPayload} tx={tx} />
+      <DreamSection settings={settings} token={token} onUpdate={onUpdate} tx={tx} />
 
       {isNativeHost ? (
         <section>
