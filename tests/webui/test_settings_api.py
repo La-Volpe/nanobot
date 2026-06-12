@@ -16,6 +16,8 @@ from nanobot.webui.settings_api import (
     settings_payload,
     settings_usage_payload,
     update_agent_settings,
+    update_channels_settings,
+    update_dream_settings,
     update_model_configuration,
     update_network_safety_settings,
     update_provider_settings,
@@ -1049,3 +1051,408 @@ def test_azure_openai_spec_no_longer_requires_api_key() -> None:
     spec = find_by_name("azure_openai")
     assert spec is not None
     assert _provider_requires_api_key(spec) is False
+
+
+# ---------------------------------------------------------------------------
+# Step 1.1 — model-behavior scalars in update_agent_settings
+# ---------------------------------------------------------------------------
+
+
+def test_update_agent_settings_model_behavior_fields(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = update_agent_settings({
+        "temperature": ["0.7"],
+        "max_tokens": ["4096"],
+        "reasoning_effort": ["high"],
+        "max_tool_iterations": ["50"],
+        "max_concurrent_subagents": ["4"],
+        "max_tool_result_chars": ["8000"],
+        "provider_retry_mode": ["persistent"],
+        "unified_session": ["true"],
+        "session_ttl_minutes": ["60"],
+    })
+
+    saved = load_config(config_path)
+    assert saved.agents.defaults.temperature == 0.7
+    assert saved.agents.defaults.max_tokens == 4096
+    assert saved.agents.defaults.reasoning_effort == "high"
+    assert saved.agents.defaults.max_tool_iterations == 50
+    assert saved.agents.defaults.max_concurrent_subagents == 4
+    assert saved.agents.defaults.max_tool_result_chars == 8000
+    assert saved.agents.defaults.provider_retry_mode == "persistent"
+    assert saved.agents.defaults.unified_session is True
+    assert saved.agents.defaults.session_ttl_minutes == 60
+    assert payload["requires_restart"] is False
+
+
+def test_update_agent_settings_temperature_out_of_range(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    with pytest.raises(WebUISettingsError, match="temperature must be between"):
+        update_agent_settings({"temperature": ["3.5"]})
+
+
+def test_update_agent_settings_reasoning_effort_invalid(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    with pytest.raises(WebUISettingsError, match="reasoning_effort"):
+        update_agent_settings({"reasoning_effort": ["ultra"]})
+
+
+def test_update_agent_settings_reasoning_effort_cleared_with_empty(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config()
+    config.agents.defaults.reasoning_effort = "high"
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    update_agent_settings({"reasoning_effort": [""]})
+
+    saved = load_config(config_path)
+    assert saved.agents.defaults.reasoning_effort is None
+
+
+# ---------------------------------------------------------------------------
+# Step 1.2 — temperature/max_tokens/reasoning_effort in preset create/update
+# ---------------------------------------------------------------------------
+
+
+def test_create_model_configuration_accepts_temperature_override(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config()
+    config.providers.openai.api_key = "sk-test"
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    create_model_configuration({
+        "label": ["Fast"],
+        "provider": ["openai"],
+        "model": ["openai/gpt-4o-mini"],
+        "temperature": ["0.7"],
+    })
+
+    saved = load_config(config_path)
+    assert saved.model_presets["fast"].temperature == 0.7
+
+
+def test_update_model_configuration_reasoning_effort_set_and_cleared(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config()
+    config.providers.openai.api_key = "sk-test"
+    config.model_presets["fast"] = ModelPresetConfig(
+        label="Fast",
+        provider="openai",
+        model="openai/gpt-4o-mini",
+    )
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    update_model_configuration({"name": ["fast"], "reasoning_effort": ["high"]})
+    saved = load_config(config_path)
+    assert saved.model_presets["fast"].reasoning_effort == "high"
+
+    update_model_configuration({"name": ["fast"], "reasoning_effort": [""]})
+    saved = load_config(config_path)
+    assert saved.model_presets["fast"].reasoning_effort is None
+
+
+# ---------------------------------------------------------------------------
+# Step 1.3 — dream endpoint + memory/session fields
+# ---------------------------------------------------------------------------
+
+
+def test_update_dream_settings_toggle_and_interval(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    update_dream_settings({"enabled": ["false"]})
+    saved = load_config(config_path)
+    assert saved.agents.defaults.dream.enabled is False
+
+    update_dream_settings({"enabled": ["true"], "interval_h": ["6"]})
+    saved = load_config(config_path)
+    assert saved.agents.defaults.dream.enabled is True
+    assert saved.agents.defaults.dream.interval_h == 6
+
+
+def test_update_dream_settings_model_override_set_and_cleared(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    update_dream_settings({"model_override": ["openrouter/deepseek-r1"]})
+    saved = load_config(config_path)
+    assert saved.agents.defaults.dream.model_override == "openrouter/deepseek-r1"
+
+    update_dream_settings({"model_override": [""]})
+    saved = load_config(config_path)
+    assert saved.agents.defaults.dream.model_override is None
+
+
+def test_update_dream_settings_interval_h_out_of_range(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    with pytest.raises(WebUISettingsError, match="interval_h must be between"):
+        update_dream_settings({"interval_h": ["9999"]})
+
+
+def test_update_agent_settings_memory_fields(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    update_agent_settings({
+        "max_messages": ["200"],
+        "consolidation_ratio": ["0.6"],
+        "disabled_skills": ["summarize,search"],
+    })
+
+    saved = load_config(config_path)
+    assert saved.agents.defaults.max_messages == 200
+    assert saved.agents.defaults.consolidation_ratio == 0.6
+    assert saved.agents.defaults.disabled_skills == ["summarize", "search"]
+
+
+def test_update_agent_settings_disabled_skills_cleared(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config()
+    config.agents.defaults.disabled_skills = ["old-skill"]
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    update_agent_settings({"disabled_skills": [""]})
+
+    saved = load_config(config_path)
+    assert saved.agents.defaults.disabled_skills == []
+
+
+# ---------------------------------------------------------------------------
+# Step 1.4 — channels settings endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_update_channels_settings_bool_fields(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = update_channels_settings({
+        "send_progress": ["false"],
+        "send_tool_hints": ["true"],
+        "show_reasoning": ["false"],
+        "extract_document_text": ["false"],
+    })
+
+    saved = load_config(config_path)
+    assert saved.channels.send_progress is False
+    assert saved.channels.send_tool_hints is True
+    assert saved.channels.show_reasoning is False
+    assert saved.channels.extract_document_text is False
+    assert "channels" in payload
+
+
+def test_update_channels_settings_send_max_retries(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    update_channels_settings({"send_max_retries": ["5"]})
+    saved = load_config(config_path)
+    assert saved.channels.send_max_retries == 5
+
+    with pytest.raises(WebUISettingsError, match="send_max_retries must be between"):
+        update_channels_settings({"send_max_retries": ["11"]})
+
+
+def test_update_channels_settings_no_params_returns_payload(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = update_channels_settings({})
+    assert "channels" in payload
+
+
+# ---------------------------------------------------------------------------
+# Steps 2.1–2.3 — payload completeness
+# ---------------------------------------------------------------------------
+
+
+def test_settings_payload_agent_behavior_scalars(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config()
+    config.agents.defaults.max_tool_iterations = 100
+    config.agents.defaults.max_concurrent_subagents = 2
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = settings_payload()
+
+    assert payload["agent"]["max_tool_iterations"] == 100
+    assert payload["agent"]["max_concurrent_subagents"] == 2
+    assert "max_tool_result_chars" in payload["agent"]
+    assert "provider_retry_mode" in payload["agent"]
+    assert "unified_session" in payload["agent"]
+    assert "session_ttl_minutes" in payload["agent"]
+
+
+def test_settings_payload_agent_memory_fields(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = settings_payload()
+
+    assert payload["agent"]["max_messages"] == 120
+    assert payload["agent"]["consolidation_ratio"] == 0.5
+    assert payload["agent"]["context_block_limit"] is None
+    assert payload["agent"]["disabled_skills"] == []
+    assert payload["agent"]["fallback_models"] == []
+
+
+def test_settings_payload_channels_defaults(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = settings_payload()
+
+    assert payload["channels"]["send_progress"] is True
+    assert payload["channels"]["send_tool_hints"] is False
+    assert payload["channels"]["show_reasoning"] is True
+    assert payload["channels"]["extract_document_text"] is True
+    assert payload["channels"]["send_max_retries"] == 3
+
+
+def test_settings_payload_advanced_ssrf_list(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config()
+    config.tools.ssrf_whitelist = ["100.64.0.0/10", "10.0.0.0/8"]
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+    monkeypatch.setattr("nanobot.webui.workspaces.get_webui_dir", lambda: tmp_path / "webui")
+
+    payload = settings_payload()
+
+    assert payload["advanced"]["ssrf_whitelist"] == ["100.64.0.0/10", "10.0.0.0/8"]
+    assert payload["advanced"]["ssrf_whitelist_count"] == 2
+    assert "exec_timeout" in payload["advanced"]
+    assert "exec_allow_patterns" in payload["advanced"]
+    assert "exec_deny_patterns" in payload["advanced"]
+
+
+def test_settings_payload_runtime_dream_expanded(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config()
+    config.agents.defaults.dream.enabled = False
+    config.agents.defaults.dream.interval_h = 4
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = settings_payload()
+
+    assert payload["runtime"]["dream"]["enabled"] is False
+    assert payload["runtime"]["dream"]["interval_h"] == 4
+    assert payload["runtime"]["dream"]["model_override"] is None
+    assert "schedule" in payload["runtime"]["dream"]
+
+
+# ---------------------------------------------------------------------------
+# Step 2.4 — restrict_to_workspace in network-safety update
+# ---------------------------------------------------------------------------
+
+
+def test_update_network_safety_settings_restrict_to_workspace(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+    monkeypatch.setattr("nanobot.webui.workspaces.get_webui_dir", lambda: tmp_path / "webui")
+
+    payload = update_network_safety_settings({"restrict_to_workspace": ["true"]})
+
+    saved = load_config(config_path)
+    assert saved.tools.restrict_to_workspace is True
+    assert payload["requires_restart"] is True
+
+
+def test_update_network_safety_settings_restrict_standalone(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+    monkeypatch.setattr("nanobot.webui.workspaces.get_webui_dir", lambda: tmp_path / "webui")
+
+    payload = update_network_safety_settings({"restrict_to_workspace": ["false"]})
+    assert payload["advanced"]["restrict_to_workspace"] is False

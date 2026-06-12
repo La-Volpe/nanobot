@@ -96,6 +96,8 @@ import {
   runMcpPresetAction,
   saveCustomMcpServer,
   updateAutomation,
+  updateChannelsSettings,
+  updateDreamSettings,
   updateImageGenerationSettings,
   updateMcpServerTools,
   updateModelConfiguration,
@@ -175,6 +177,21 @@ interface AgentSettingsDraft {
   botName: string;
   botIcon: string;
   toolHintMaxLength: number;
+  // Step 3.1 — model-behavior scalars
+  temperature: number;
+  maxTokens: number;
+  reasoningEffort: string;
+  // Step 3.2 — behavior sub-section
+  maxToolIterations: number;
+  maxConcurrentSubagents: number;
+  maxToolResultChars: number;
+  providerRetryMode: "standard" | "persistent";
+  unifiedSession: boolean;
+  sessionTtlMinutes: number;
+  // Step 3.3 — memory fields
+  maxMessages: number;
+  consolidationRatio: number;
+  contextBlockLimit: number | null;
 }
 
 interface ModelConfigurationDraft {
@@ -375,6 +392,18 @@ const DEFAULT_AGENT_SETTINGS_DRAFT: AgentSettingsDraft = {
   botName: "nanobot",
   botIcon: "",
   toolHintMaxLength: 40,
+  temperature: 0.1,
+  maxTokens: 8192,
+  reasoningEffort: "",
+  maxToolIterations: 200,
+  maxConcurrentSubagents: 1,
+  maxToolResultChars: 16_000,
+  providerRetryMode: "standard",
+  unifiedSession: false,
+  sessionTtlMinutes: 0,
+  maxMessages: 120,
+  consolidationRatio: 0.5,
+  contextBlockLimit: null,
 };
 
 const DEFAULT_WEB_SEARCH_FORM: WebSearchSettingsUpdate = {
@@ -439,6 +468,18 @@ function agentDraftFromPayload(payload: SettingsPayload): AgentSettingsDraft {
     botName: payload.agent.bot_name,
     botIcon: payload.agent.bot_icon,
     toolHintMaxLength: payload.agent.tool_hint_max_length,
+    temperature: payload.agent.temperature ?? 0.1,
+    maxTokens: payload.agent.max_tokens ?? 8192,
+    reasoningEffort: payload.agent.reasoning_effort ?? "",
+    maxToolIterations: payload.agent.max_tool_iterations ?? 200,
+    maxConcurrentSubagents: payload.agent.max_concurrent_subagents ?? 1,
+    maxToolResultChars: payload.agent.max_tool_result_chars ?? 16_000,
+    providerRetryMode: payload.agent.provider_retry_mode ?? "standard",
+    unifiedSession: payload.agent.unified_session ?? false,
+    sessionTtlMinutes: payload.agent.session_ttl_minutes ?? 0,
+    maxMessages: payload.agent.max_messages ?? 120,
+    consolidationRatio: payload.agent.consolidation_ratio ?? 0.5,
+    contextBlockLimit: payload.agent.context_block_limit ?? null,
   };
 }
 
@@ -944,6 +985,9 @@ export function SettingsView({
           ...(form.contextWindowTokens !== selectedPreset.context_window_tokens
             ? { contextWindowTokens: form.contextWindowTokens }
             : {}),
+          temperature: form.temperature,
+          maxTokens: form.maxTokens,
+          reasoningEffort: form.reasoningEffort || null,
         });
       } else {
         const defaultModel = defaultPreset(settings)?.model ?? settings.agent.model;
@@ -958,6 +1002,9 @@ export function SettingsView({
           ...(form.contextWindowTokens !== defaultContextWindowTokens
             ? { contextWindowTokens: form.contextWindowTokens }
             : {}),
+          temperature: form.temperature,
+          maxTokens: form.maxTokens,
+          reasoningEffort: form.reasoningEffort || null,
         });
       }
       applyPayload(payload);
@@ -1024,6 +1071,45 @@ export function SettingsView({
       }
       await onWorkspaceSettingsChange?.();
       await maybeRestartHostEngine(payload);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveBehaviorSettings = async () => {
+    if (!settings || saving) return;
+    setSaving(true);
+    try {
+      const payload = await updateSettings(token, {
+        maxToolIterations: form.maxToolIterations,
+        maxConcurrentSubagents: form.maxConcurrentSubagents,
+        maxToolResultChars: form.maxToolResultChars,
+        providerRetryMode: form.providerRetryMode,
+        unifiedSession: form.unifiedSession,
+        sessionTtlMinutes: form.sessionTtlMinutes,
+      });
+      applyPayload(payload);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveMemorySettings = async () => {
+    if (!settings || saving) return;
+    setSaving(true);
+    try {
+      const payload = await updateSettings(token, {
+        maxMessages: form.maxMessages,
+        consolidationRatio: form.consolidationRatio,
+        contextBlockLimit: form.contextBlockLimit,
+      });
+      applyPayload(payload);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -1476,6 +1562,7 @@ export function SettingsView({
               providerSaving={providerSaving}
               onProviderOAuthLogin={(provider) => runProviderOAuth(provider, "login")}
               onSave={saveModelSettings}
+              onSaveBehavior={saveBehaviorSettings}
               onCreateConfiguration={openModelConfigurationDialog}
             />
             <ProvidersSettings
@@ -1641,12 +1728,15 @@ export function SettingsView({
       case "runtime":
         return (
           <RuntimeSettings
+            token={token}
             form={form}
             setForm={setForm}
             settings={settings}
             dirty={runtimeDirty}
             saving={saving}
             onSave={saveRuntimeSettings}
+            onSaveMemory={saveMemorySettings}
+            onUpdate={applyPayload}
             onRestart={restartViaSettingsSurface}
             isRestarting={isRestarting || hostEngineApplying}
             requiresRestartPending={pendingRestartSections.runtime}
@@ -2368,6 +2458,7 @@ function ModelsSettings({
   providerSaving,
   onProviderOAuthLogin,
   onSave,
+  onSaveBehavior,
   onCreateConfiguration,
 }: {
   token: string;
@@ -2380,6 +2471,7 @@ function ModelsSettings({
   providerSaving: string | null;
   onProviderOAuthLogin: (provider: string) => void;
   onSave: () => void;
+  onSaveBehavior: () => void;
   onCreateConfiguration: () => void;
 }) {
   const { t } = useTranslation();
@@ -2528,6 +2620,59 @@ function ModelsSettings({
               }
             />
           </SettingsRow>
+          <SettingsRow
+            title={tx("settings.rows.maxTokens", "Max tokens")}
+            description={tx("settings.help.maxTokens", "Maximum tokens the model may generate per turn.")}
+          >
+            <Input
+              type="number"
+              min={1}
+              max={1000000}
+              value={form.maxTokens}
+              onChange={(e) => setForm((prev) => ({ ...prev, maxTokens: Number(e.target.value) }))}
+              className="h-8 w-[120px] rounded-full text-[13px]"
+            />
+          </SettingsRow>
+          <SettingsRow
+            title={tx("settings.rows.temperature", "Temperature")}
+            description={tx("settings.help.temperature", "Controls randomness. Lower = more focused, higher = more creative.")}
+          >
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min={0}
+                max={2}
+                step={0.05}
+                value={form.temperature}
+                onChange={(e) => setForm((prev) => ({ ...prev, temperature: Number(e.target.value) }))}
+                className="w-[100px] accent-foreground"
+              />
+              <Input
+                type="number"
+                min={0}
+                max={2}
+                step={0.05}
+                value={form.temperature}
+                onChange={(e) => setForm((prev) => ({ ...prev, temperature: Number(e.target.value) }))}
+                className="h-8 w-[72px] rounded-full text-[13px]"
+              />
+            </div>
+          </SettingsRow>
+          <SettingsRow
+            title={tx("settings.rows.reasoningEffort", "Reasoning effort")}
+            description={tx("settings.help.reasoningEffort", "Thinking effort for models that support it.")}
+          >
+            <SegmentedControl
+              value={form.reasoningEffort}
+              options={[
+                { value: "", label: tx("settings.values.default", "Default") },
+                { value: "low", label: tx("settings.values.low", "Low") },
+                { value: "medium", label: tx("settings.values.medium", "Medium") },
+                { value: "high", label: tx("settings.values.high", "High") },
+              ]}
+              onChange={(value) => setForm((prev) => ({ ...prev, reasoningEffort: value }))}
+            />
+          </SettingsRow>
           <SettingsFooter
             dirty={dirty}
             saving={saving}
@@ -2542,7 +2687,125 @@ function ModelsSettings({
           />
         </SettingsGroup>
       </section>
+      <BehaviorSection
+        form={form}
+        setForm={setForm}
+        saving={saving}
+        onSave={onSaveBehavior}
+        tx={tx}
+      />
     </div>
+  );
+}
+
+function BehaviorSection({
+  form,
+  setForm,
+  saving,
+  onSave,
+  tx,
+}: {
+  form: AgentSettingsDraft;
+  setForm: Dispatch<SetStateAction<AgentSettingsDraft>>;
+  saving: boolean;
+  onSave: () => void;
+  tx: (key: string, fallback: string) => string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="mb-2 flex w-full items-center gap-1 px-1 text-[13px] font-semibold tracking-[-0.01em] text-foreground/85 hover:text-foreground"
+      >
+        {open ? <ChevronDown className="h-3.5 w-3.5" aria-hidden /> : <ChevronRight className="h-3.5 w-3.5" aria-hidden />}
+        {tx("settings.sections.behavior", "Behavior")}
+      </button>
+      {open ? (
+        <SettingsGroup>
+          <SettingsRow
+            title={tx("settings.rows.maxToolIterations", "Max tool iterations")}
+            description={tx("settings.help.maxToolIterations", "Maximum number of tool calls per agent turn.")}
+          >
+            <Input
+              type="number"
+              min={1}
+              max={2000}
+              value={form.maxToolIterations}
+              onChange={(e) => setForm((prev) => ({ ...prev, maxToolIterations: Number(e.target.value) }))}
+              className="h-8 w-[100px] rounded-full text-[13px]"
+            />
+          </SettingsRow>
+          <SettingsRow
+            title={tx("settings.rows.maxConcurrentSubagents", "Max concurrent subagents")}
+            description={tx("settings.help.maxConcurrentSubagents", "How many subagent tasks may run in parallel.")}
+          >
+            <Input
+              type="number"
+              min={1}
+              max={32}
+              value={form.maxConcurrentSubagents}
+              onChange={(e) => setForm((prev) => ({ ...prev, maxConcurrentSubagents: Number(e.target.value) }))}
+              className="h-8 w-[100px] rounded-full text-[13px]"
+            />
+          </SettingsRow>
+          <SettingsRow
+            title={tx("settings.rows.maxToolResultChars", "Max tool result size")}
+            description={tx("settings.help.maxToolResultChars", "Truncates large tool outputs at this character count.")}
+          >
+            <Input
+              type="number"
+              min={500}
+              max={500000}
+              value={form.maxToolResultChars}
+              onChange={(e) => setForm((prev) => ({ ...prev, maxToolResultChars: Number(e.target.value) }))}
+              className="h-8 w-[120px] rounded-full text-[13px]"
+            />
+          </SettingsRow>
+          <SettingsRow
+            title={tx("settings.rows.providerRetryMode", "Retry mode")}
+            description={tx("settings.help.providerRetryMode", "How aggressively to retry failed provider calls.")}
+          >
+            <SegmentedControl
+              value={form.providerRetryMode}
+              options={[
+                { value: "standard", label: tx("settings.values.standard", "Standard") },
+                { value: "persistent", label: tx("settings.values.persistent", "Persistent") },
+              ]}
+              onChange={(value) => setForm((prev) => ({ ...prev, providerRetryMode: value as "standard" | "persistent" }))}
+            />
+          </SettingsRow>
+          <SettingsRow
+            title={tx("settings.rows.unifiedSession", "Unified session")}
+            description={tx("settings.help.unifiedSession", "All channels share one conversation history.")}
+          >
+            <ToggleButton
+              checked={form.unifiedSession}
+              onChange={(checked) => setForm((prev) => ({ ...prev, unifiedSession: checked }))}
+              label={tx("settings.rows.unifiedSession", "Unified session")}
+            />
+          </SettingsRow>
+          <SettingsRow
+            title={tx("settings.rows.sessionTtlMinutes", "Session timeout")}
+            description={tx("settings.help.sessionTtlMinutes", "Auto-compact idle sessions after this many minutes (0 = disabled).")}
+          >
+            <div className="flex items-center gap-1.5">
+              <Input
+                type="number"
+                min={0}
+                max={525960}
+                value={form.sessionTtlMinutes}
+                onChange={(e) => setForm((prev) => ({ ...prev, sessionTtlMinutes: Number(e.target.value) }))}
+                className="h-8 w-[100px] rounded-full text-[13px]"
+              />
+              <span className="text-[12px] text-muted-foreground">min</span>
+            </div>
+          </SettingsRow>
+          <SettingsFooter dirty saving={saving} saved={false} onSave={onSave} />
+        </SettingsGroup>
+      ) : null}
+    </section>
   );
 }
 
@@ -5876,23 +6139,119 @@ function CliAppLogo({ app, showBrandLogos }: { app: CliAppInfo; showBrandLogos: 
   );
 }
 
+function DreamSection({
+  settings,
+  token,
+  onUpdate,
+  tx,
+}: {
+  settings: SettingsPayload;
+  token: string;
+  onUpdate: (payload: SettingsPayload) => void;
+  tx: (key: string, fallback: string) => string;
+}) {
+  const dream = settings.runtime?.dream;
+  const [enabled, setEnabled] = useState(dream?.enabled ?? true);
+  const [intervalH, setIntervalH] = useState(dream?.interval_h ?? 2);
+  const [modelOverride, setModelOverride] = useState(dream?.model_override ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const payload = await updateDreamSettings(token, {
+        enabled,
+        intervalH,
+        modelOverride: modelOverride.trim() || null,
+      });
+      onUpdate(payload);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section>
+      <SettingsSectionTitle>{tx("settings.sections.dream", "Dream")}</SettingsSectionTitle>
+      <SettingsGroup>
+        <SettingsRow
+          title={tx("settings.rows.dreamEnabled", "Dream consolidation")}
+          description={tx("settings.help.dreamEnabled", "Periodically summarize old memories in the background.")}
+        >
+          <ToggleButton
+            checked={enabled}
+            onChange={setEnabled}
+            label={tx("settings.rows.dreamEnabled", "Dream consolidation")}
+          />
+        </SettingsRow>
+        {enabled ? (
+          <>
+            <SettingsRow
+              title={tx("settings.rows.dreamInterval", "Dream interval")}
+              description={tx("settings.help.dreamInterval", "How often dream consolidation runs.")}
+            >
+              <div className="flex items-center gap-1.5">
+                <Input
+                  type="number"
+                  min={1}
+                  max={8760}
+                  value={intervalH}
+                  onChange={(e) => setIntervalH(Number(e.target.value))}
+                  className="h-8 w-[80px] rounded-full text-[13px]"
+                />
+                <span className="text-[12px] text-muted-foreground">h</span>
+              </div>
+            </SettingsRow>
+            <SettingsRow
+              title={tx("settings.rows.dreamModel", "Dream model")}
+              description={tx("settings.help.dreamModel", "Model used for dream consolidation (empty = agent default).")}
+            >
+              <Input
+                type="text"
+                value={modelOverride}
+                placeholder={tx("settings.values.agentDefault", "Uses agent default")}
+                onChange={(e) => setModelOverride(e.target.value)}
+                className="h-8 w-[220px] rounded-full text-[13px]"
+              />
+            </SettingsRow>
+          </>
+        ) : null}
+        {error ? (
+          <div className="px-5 py-2 text-[12px] text-destructive">{error}</div>
+        ) : null}
+        <SettingsFooter dirty saving={saving} saved={false} onSave={save} />
+      </SettingsGroup>
+    </section>
+  );
+}
+
 function RuntimeSettings({
+  token,
   form,
   setForm,
   settings,
   dirty,
   saving,
   onSave,
+  onSaveMemory,
+  onUpdate,
   onRestart,
   isRestarting,
   requiresRestartPending,
 }: {
+  token: string;
   form: AgentSettingsDraft;
   setForm: Dispatch<SetStateAction<AgentSettingsDraft>>;
   settings: SettingsPayload;
   dirty: boolean;
   saving: boolean;
   onSave: () => void;
+  onSaveMemory: () => void;
+  onUpdate: (payload: SettingsPayload) => void;
   onRestart?: () => void;
   isRestarting?: boolean;
   requiresRestartPending: boolean;
@@ -5991,6 +6350,74 @@ function RuntimeSettings({
           />
         </SettingsGroup>
       </section>
+
+      <section>
+        <SettingsSectionTitle>{tx("settings.sections.memory", "Memory")}</SettingsSectionTitle>
+        <SettingsGroup>
+          <SettingsRow
+            title={tx("settings.rows.maxMessages", "Max history messages")}
+            description={tx("settings.help.maxMessages", "Older messages are consolidated when this limit is reached.")}
+          >
+            <Input
+              type="number"
+              min={10}
+              max={10000}
+              value={form.maxMessages}
+              onChange={(e) => setForm((prev) => ({ ...prev, maxMessages: Number(e.target.value) }))}
+              className="h-8 w-[100px] rounded-full text-[13px]"
+            />
+          </SettingsRow>
+          <SettingsRow
+            title={tx("settings.rows.consolidationRatio", "Consolidation ratio")}
+            description={tx("settings.help.consolidationRatio", "Fraction of history retained after compression.")}
+          >
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min={0.1}
+                max={0.9}
+                step={0.05}
+                value={form.consolidationRatio}
+                onChange={(e) => setForm((prev) => ({ ...prev, consolidationRatio: Number(e.target.value) }))}
+                className="w-[100px] accent-foreground"
+              />
+              <Input
+                type="number"
+                min={0.1}
+                max={0.9}
+                step={0.05}
+                value={form.consolidationRatio}
+                onChange={(e) => setForm((prev) => ({ ...prev, consolidationRatio: Number(e.target.value) }))}
+                className="h-8 w-[72px] rounded-full text-[13px]"
+              />
+            </div>
+          </SettingsRow>
+          <SettingsRow
+            title={tx("settings.rows.contextBlockLimit", "Context block limit")}
+            description={tx("settings.help.contextBlockLimit", "Maximum context blocks to include (empty = no limit).")}
+          >
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={1}
+                max={10000}
+                value={form.contextBlockLimit ?? ""}
+                placeholder={tx("settings.values.noLimit", "No limit")}
+                onChange={(e) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    contextBlockLimit: e.target.value === "" ? null : Number(e.target.value),
+                  }))
+                }
+                className="h-8 w-[100px] rounded-full text-[13px]"
+              />
+            </div>
+          </SettingsRow>
+          <SettingsFooter dirty saving={saving} saved={false} onSave={onSaveMemory} />
+        </SettingsGroup>
+      </section>
+
+      <DreamSection settings={settings} token={token} onUpdate={applyPayload} tx={tx} />
 
       {isNativeHost ? (
         <section>

@@ -6,6 +6,7 @@ settings payload shape and the allowlisted config mutations exposed to WebUI.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -22,7 +23,7 @@ from nanobot.audio.transcription_registry import (
     transcription_provider_names,
 )
 from nanobot.config.loader import get_config_path, load_config, save_config
-from nanobot.config.schema import ModelPresetConfig, ProviderConfig
+from nanobot.config.schema import InlineFallbackConfig, ModelPresetConfig, ProviderConfig
 from nanobot.providers.image_generation import (
     get_image_gen_provider,
     image_gen_provider_names,
@@ -779,6 +780,22 @@ def settings_payload(
             "bot_name": defaults.bot_name,
             "bot_icon": defaults.bot_icon,
             "tool_hint_max_length": defaults.tool_hint_max_length,
+            # Step 2.1 — behavior scalars
+            "max_tool_iterations": defaults.max_tool_iterations,
+            "max_concurrent_subagents": defaults.max_concurrent_subagents,
+            "max_tool_result_chars": defaults.max_tool_result_chars,
+            "provider_retry_mode": defaults.provider_retry_mode,
+            "unified_session": defaults.unified_session,
+            "session_ttl_minutes": defaults.session_ttl_minutes,
+            # Step 2.2 — memory + session fields
+            "max_messages": defaults.max_messages,
+            "consolidation_ratio": defaults.consolidation_ratio,
+            "context_block_limit": defaults.context_block_limit,
+            "disabled_skills": list(defaults.disabled_skills),
+            "fallback_models": [
+                (f if isinstance(f, str) else f.model_dump(exclude_none=True))
+                for f in defaults.fallback_models
+            ],
         },
         "model_presets": model_presets,
         "providers": providers,
@@ -836,9 +853,19 @@ def settings_payload(
                 "keep_recent_messages": config.gateway.heartbeat.keep_recent_messages,
             },
             "dream": {
+                "enabled": defaults.dream.enabled,
+                "interval_h": defaults.dream.interval_h,
+                "model_override": defaults.dream.model_override,
                 "schedule": defaults.dream.describe_schedule(),
             },
             "unified_session": defaults.unified_session,
+        },
+        "channels": {
+            "send_progress": config.channels.send_progress,
+            "send_tool_hints": config.channels.send_tool_hints,
+            "show_reasoning": config.channels.show_reasoning,
+            "extract_document_text": config.channels.extract_document_text,
+            "send_max_retries": config.channels.send_max_retries,
         },
         "usage": token_usage_payload(timezone_name=defaults.timezone),
         "advanced": {
@@ -848,10 +875,14 @@ def settings_payload(
             "allow_local_preview_access": config.tools.webui_allow_local_service_access,
             "webui_default_access_mode": read_webui_default_access_mode(),
             "private_service_protection_enabled": True,
+            "ssrf_whitelist": list(config.tools.ssrf_whitelist),
             "ssrf_whitelist_count": len(config.tools.ssrf_whitelist),
             "mcp_server_count": len(config.tools.mcp_servers),
             "exec_enabled": exec_config.enable,
+            "exec_timeout": exec_config.timeout,
             "exec_sandbox": exec_config.sandbox or None,
+            "exec_allow_patterns": list(exec_config.allow_patterns),
+            "exec_deny_patterns": list(exec_config.deny_patterns),
             "exec_path_prepend_set": bool(exec_config.path_prepend),
             "exec_path_append_set": bool(exec_config.path_append),
         },
@@ -966,6 +997,174 @@ def update_agent_settings(query: QueryParams) -> dict[str, Any]:
             changed = True
             restart_required = True
 
+    raw = _query_first_alias(query, "temperature", "temperature")
+    if raw is not None:
+        try:
+            value = float(raw)
+        except ValueError:
+            raise WebUISettingsError("temperature must be a number") from None
+        if not (0.0 <= value <= 2.0):
+            raise WebUISettingsError("temperature must be between 0.0 and 2.0")
+        if defaults.temperature != value:
+            defaults.temperature = value
+            changed = True
+
+    raw = _query_first_alias(query, "max_tokens", "maxTokens")
+    if raw is not None:
+        try:
+            value_int = int(raw)
+        except ValueError:
+            raise WebUISettingsError("max_tokens must be an integer") from None
+        if not (1 <= value_int <= 1_000_000):
+            raise WebUISettingsError("max_tokens must be between 1 and 1000000")
+        if defaults.max_tokens != value_int:
+            defaults.max_tokens = value_int
+            changed = True
+
+    raw = _query_first_alias(query, "reasoning_effort", "reasoningEffort")
+    if raw is not None:
+        effort = raw.strip()
+        effort_value = None if effort == "" else effort
+        if effort_value is not None and effort_value not in {"low", "medium", "high"}:
+            raise WebUISettingsError("reasoning_effort must be low, medium, high, or empty")
+        if defaults.reasoning_effort != effort_value:
+            defaults.reasoning_effort = effort_value
+            changed = True
+
+    raw = _query_first_alias(query, "max_tool_iterations", "maxToolIterations")
+    if raw is not None:
+        try:
+            value_int = int(raw)
+        except ValueError:
+            raise WebUISettingsError("max_tool_iterations must be an integer") from None
+        if not (1 <= value_int <= 2000):
+            raise WebUISettingsError("max_tool_iterations must be between 1 and 2000")
+        if defaults.max_tool_iterations != value_int:
+            defaults.max_tool_iterations = value_int
+            changed = True
+
+    raw = _query_first_alias(query, "max_concurrent_subagents", "maxConcurrentSubagents")
+    if raw is not None:
+        try:
+            value_int = int(raw)
+        except ValueError:
+            raise WebUISettingsError("max_concurrent_subagents must be an integer") from None
+        if not (1 <= value_int <= 32):
+            raise WebUISettingsError("max_concurrent_subagents must be between 1 and 32")
+        if defaults.max_concurrent_subagents != value_int:
+            defaults.max_concurrent_subagents = value_int
+            changed = True
+
+    raw = _query_first_alias(query, "max_tool_result_chars", "maxToolResultChars")
+    if raw is not None:
+        try:
+            value_int = int(raw)
+        except ValueError:
+            raise WebUISettingsError("max_tool_result_chars must be an integer") from None
+        if not (500 <= value_int <= 500_000):
+            raise WebUISettingsError("max_tool_result_chars must be between 500 and 500000")
+        if defaults.max_tool_result_chars != value_int:
+            defaults.max_tool_result_chars = value_int
+            changed = True
+
+    raw = _query_first_alias(query, "provider_retry_mode", "providerRetryMode")
+    if raw is not None:
+        retry_mode = raw.strip()
+        if retry_mode not in {"standard", "persistent"}:
+            raise WebUISettingsError("provider_retry_mode must be standard or persistent")
+        if defaults.provider_retry_mode != retry_mode:
+            defaults.provider_retry_mode = retry_mode
+            changed = True
+
+    raw = _query_first_alias(query, "unified_session", "unifiedSession")
+    if raw is not None:
+        value_bool = _parse_bool(raw, "unified_session")
+        if defaults.unified_session != value_bool:
+            defaults.unified_session = value_bool
+            changed = True
+
+    raw = _query_first_alias(query, "session_ttl_minutes", "sessionTtlMinutes")
+    if raw is not None:
+        try:
+            value_int = int(raw)
+        except ValueError:
+            raise WebUISettingsError("session_ttl_minutes must be an integer") from None
+        if not (0 <= value_int <= 525_960):
+            raise WebUISettingsError("session_ttl_minutes must be between 0 and 525960")
+        if defaults.session_ttl_minutes != value_int:
+            defaults.session_ttl_minutes = value_int
+            changed = True
+
+    raw = _query_first_alias(query, "max_messages", "maxMessages")
+    if raw is not None:
+        try:
+            value_int = int(raw)
+        except ValueError:
+            raise WebUISettingsError("max_messages must be an integer") from None
+        if not (10 <= value_int <= 10_000):
+            raise WebUISettingsError("max_messages must be between 10 and 10000")
+        if defaults.max_messages != value_int:
+            defaults.max_messages = value_int
+            changed = True
+
+    raw = _query_first_alias(query, "consolidation_ratio", "consolidationRatio")
+    if raw is not None:
+        try:
+            cr_val = float(raw)
+        except ValueError:
+            raise WebUISettingsError("consolidation_ratio must be a number") from None
+        if not (0.1 <= cr_val <= 0.9):
+            raise WebUISettingsError("consolidation_ratio must be between 0.1 and 0.9")
+        if defaults.consolidation_ratio != cr_val:
+            defaults.consolidation_ratio = cr_val
+            changed = True
+
+    raw = _query_first_alias(query, "context_block_limit", "contextBlockLimit")
+    if raw is not None:
+        stripped = raw.strip()
+        if stripped in ("", "null", "none"):
+            cbl_val: int | None = None
+        else:
+            try:
+                cbl_val = int(stripped)
+            except ValueError:
+                raise WebUISettingsError("context_block_limit must be an integer or null") from None
+            if not (1 <= cbl_val <= 10_000):
+                raise WebUISettingsError("context_block_limit must be between 1 and 10000")
+        if defaults.context_block_limit != cbl_val:
+            defaults.context_block_limit = cbl_val
+            changed = True
+
+    raw = _query_first_alias(query, "disabled_skills", "disabledSkills")
+    if raw is not None:
+        skills = [s.strip() for s in raw.split(",") if s.strip()]
+        if defaults.disabled_skills != skills:
+            defaults.disabled_skills = skills
+            changed = True
+
+    raw = _query_first_alias(query, "fallback_models", "fallbackModels")
+    if raw is not None:
+        try:
+            entries = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise WebUISettingsError(f"fallback_models must be a JSON array: {exc}") from exc
+        if not isinstance(entries, list):
+            raise WebUISettingsError("fallback_models must be a JSON array")
+        parsed_fallbacks: list[Any] = []
+        for entry in entries:
+            if isinstance(entry, str):
+                parsed_fallbacks.append(entry)
+            elif isinstance(entry, dict):
+                try:
+                    parsed_fallbacks.append(InlineFallbackConfig.model_validate(entry))
+                except Exception as exc:
+                    raise WebUISettingsError(f"invalid fallback_models entry: {exc}") from exc
+            else:
+                raise WebUISettingsError("fallback_models entries must be strings or objects")
+        if defaults.fallback_models != parsed_fallbacks:
+            defaults.fallback_models = parsed_fallbacks
+            changed = True
+
     if changed:
         save_config(config)
     return settings_payload(requires_restart=restart_required)
@@ -991,14 +1190,50 @@ def create_model_configuration(query: QueryParams) -> dict[str, Any]:
     _validate_configured_provider(config, provider)
 
     base = config.resolve_default_preset()
+
+    preset_temperature = base.temperature
+    raw = _query_first_alias(query, "temperature", "temperature")
+    if raw is not None:
+        try:
+            preset_temperature = float(raw)
+        except ValueError:
+            raise WebUISettingsError("temperature must be a number") from None
+        if not (0.0 <= preset_temperature <= 2.0):
+            raise WebUISettingsError("temperature must be between 0.0 and 2.0")
+
+    preset_max_tokens = base.max_tokens
+    raw = _query_first_alias(query, "max_tokens", "maxTokens")
+    if raw is not None:
+        try:
+            preset_max_tokens = int(raw)
+        except ValueError:
+            raise WebUISettingsError("max_tokens must be an integer") from None
+        if not (1 <= preset_max_tokens <= 1_000_000):
+            raise WebUISettingsError("max_tokens must be between 1 and 1000000")
+
+    preset_reasoning_effort = base.reasoning_effort
+    raw = _query_first_alias(query, "reasoning_effort", "reasoningEffort")
+    if raw is not None:
+        effort = raw.strip()
+        preset_reasoning_effort = None if effort == "" else effort
+        if preset_reasoning_effort is not None and preset_reasoning_effort not in {"low", "medium", "high"}:
+            raise WebUISettingsError("reasoning_effort must be low, medium, high, or empty")
+
+    preset_context_window = base.context_window_tokens
+    override_ctx = _parse_context_window_tokens(
+        _query_first_alias(query, "context_window_tokens", "contextWindowTokens")
+    )
+    if override_ctx is not None:
+        preset_context_window = override_ctx
+
     config.model_presets[name] = ModelPresetConfig(
         label=label,
         model=model,
         provider=provider,
-        max_tokens=base.max_tokens,
-        context_window_tokens=base.context_window_tokens,
-        temperature=base.temperature,
-        reasoning_effort=base.reasoning_effort,
+        max_tokens=preset_max_tokens,
+        context_window_tokens=preset_context_window,
+        temperature=preset_temperature,
+        reasoning_effort=preset_reasoning_effort,
     )
     config.agents.defaults.model_preset = name
     save_config(config)
@@ -1053,6 +1288,40 @@ def update_model_configuration(query: QueryParams) -> dict[str, Any]:
     ):
         preset.context_window_tokens = context_window_tokens
         changed = True
+
+    raw = _query_first_alias(query, "temperature", "temperature")
+    if raw is not None:
+        try:
+            temp_val = float(raw)
+        except ValueError:
+            raise WebUISettingsError("temperature must be a number") from None
+        if not (0.0 <= temp_val <= 2.0):
+            raise WebUISettingsError("temperature must be between 0.0 and 2.0")
+        if preset.temperature != temp_val:
+            preset.temperature = temp_val
+            changed = True
+
+    raw = _query_first_alias(query, "max_tokens", "maxTokens")
+    if raw is not None:
+        try:
+            mt_val = int(raw)
+        except ValueError:
+            raise WebUISettingsError("max_tokens must be an integer") from None
+        if not (1 <= mt_val <= 1_000_000):
+            raise WebUISettingsError("max_tokens must be between 1 and 1000000")
+        if preset.max_tokens != mt_val:
+            preset.max_tokens = mt_val
+            changed = True
+
+    raw = _query_first_alias(query, "reasoning_effort", "reasoningEffort")
+    if raw is not None:
+        effort = raw.strip()
+        effort_val = None if effort == "" else effort
+        if effort_val is not None and effort_val not in {"low", "medium", "high"}:
+            raise WebUISettingsError("reasoning_effort must be low, medium, high, or empty")
+        if preset.reasoning_effort != effort_val:
+            preset.reasoning_effort = effort_val
+            changed = True
 
     if config.agents.defaults.model_preset != name:
         config.agents.defaults.model_preset = name
@@ -1190,22 +1459,82 @@ def logout_oauth_provider(query: QueryParams) -> dict[str, Any]:
     return settings_payload()
 
 
+def update_channels_settings(query: QueryParams) -> dict[str, Any]:
+    config = load_config()
+    channels = config.channels
+    changed = False
+
+    raw = _query_first_alias(query, "send_progress", "sendProgress")
+    if raw is not None:
+        value_bool = _parse_bool(raw, "send_progress")
+        if channels.send_progress != value_bool:
+            channels.send_progress = value_bool
+            changed = True
+
+    raw = _query_first_alias(query, "send_tool_hints", "sendToolHints")
+    if raw is not None:
+        value_bool = _parse_bool(raw, "send_tool_hints")
+        if channels.send_tool_hints != value_bool:
+            channels.send_tool_hints = value_bool
+            changed = True
+
+    raw = _query_first_alias(query, "show_reasoning", "showReasoning")
+    if raw is not None:
+        value_bool = _parse_bool(raw, "show_reasoning")
+        if channels.show_reasoning != value_bool:
+            channels.show_reasoning = value_bool
+            changed = True
+
+    raw = _query_first_alias(query, "extract_document_text", "extractDocumentText")
+    if raw is not None:
+        value_bool = _parse_bool(raw, "extract_document_text")
+        if channels.extract_document_text != value_bool:
+            channels.extract_document_text = value_bool
+            changed = True
+
+    raw = _query_first_alias(query, "send_max_retries", "sendMaxRetries")
+    if raw is not None:
+        try:
+            value_int = int(raw)
+        except ValueError:
+            raise WebUISettingsError("send_max_retries must be an integer") from None
+        if not (0 <= value_int <= 10):
+            raise WebUISettingsError("send_max_retries must be between 0 and 10")
+        if channels.send_max_retries != value_int:
+            channels.send_max_retries = value_int
+            changed = True
+
+    if changed:
+        save_config(config)
+    return settings_payload()
+
+
 def update_network_safety_settings(query: QueryParams) -> dict[str, Any]:
     raw_allow = (
         _query_first_alias(query, "webui_allow_local_service_access", "webuiAllowLocalServiceAccess")
         or _query_first_alias(query, "allow_local_preview_access", "allowLocalPreviewAccess")
     )
     raw_default_access_mode = _query_first_alias(query, "webui_default_access_mode", "webuiDefaultAccessMode")
-    if raw_allow is None and raw_default_access_mode is None:
+    raw_restrict = _query_first_alias(query, "restrict_to_workspace", "restrictToWorkspace")
+    if raw_allow is None and raw_default_access_mode is None and raw_restrict is None:
         raise WebUISettingsError("webui_allow_local_service_access or webui_default_access_mode is required")
 
     config = load_config()
     changed = False
+    restart_required = False
+
     if raw_allow is not None:
         webui_allow_local_service_access = _parse_bool(raw_allow, "webui_allow_local_service_access")
         if config.tools.webui_allow_local_service_access != webui_allow_local_service_access:
             config.tools.webui_allow_local_service_access = webui_allow_local_service_access
             changed = True
+
+    if raw_restrict is not None:
+        restrict = _parse_bool(raw_restrict, "restrict_to_workspace")
+        if config.tools.restrict_to_workspace != restrict:
+            config.tools.restrict_to_workspace = restrict
+            changed = True
+            restart_required = True
 
     if changed:
         save_config(config)
@@ -1219,7 +1548,7 @@ def update_network_safety_settings(query: QueryParams) -> dict[str, Any]:
             write_webui_default_access_mode(default_access_mode)
         except ValueError as exc:
             raise WebUISettingsError(str(exc)) from exc
-    return settings_payload(requires_restart=changed)
+    return settings_payload(requires_restart=restart_required or changed)
 
 
 def update_web_search_settings(query: QueryParams) -> dict[str, Any]:
@@ -1405,6 +1734,42 @@ def update_image_generation_settings(query: QueryParams) -> dict[str, Any]:
     if changed:
         save_config(config)
     return settings_payload(requires_restart=changed)
+
+
+def update_dream_settings(query: QueryParams) -> dict[str, Any]:
+    config = load_config()
+    dream = config.agents.defaults.dream
+    changed = False
+
+    raw = _query_first(query, "enabled")
+    if raw is not None:
+        value_bool = _parse_bool(raw, "enabled")
+        if dream.enabled != value_bool:
+            dream.enabled = value_bool
+            changed = True
+
+    raw = _query_first_alias(query, "interval_h", "intervalH")
+    if raw is not None:
+        try:
+            value_int = int(raw)
+        except ValueError:
+            raise WebUISettingsError("interval_h must be an integer") from None
+        if not (1 <= value_int <= 8760):
+            raise WebUISettingsError("interval_h must be between 1 and 8760")
+        if dream.interval_h != value_int:
+            dream.interval_h = value_int
+            changed = True
+
+    raw = _query_first_alias(query, "model_override", "modelOverride")
+    if raw is not None:
+        override = raw.strip() or None
+        if dream.model_override != override:
+            dream.model_override = override
+            changed = True
+
+    if changed:
+        save_config(config)
+    return settings_payload()
 
 
 def update_transcription_settings(query: QueryParams) -> dict[str, Any]:
