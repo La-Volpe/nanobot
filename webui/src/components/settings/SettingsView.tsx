@@ -468,9 +468,9 @@ function agentDraftFromPayload(payload: SettingsPayload): AgentSettingsDraft {
     botName: payload.agent.bot_name,
     botIcon: payload.agent.bot_icon,
     toolHintMaxLength: payload.agent.tool_hint_max_length,
-    temperature: payload.agent.temperature ?? 0.1,
-    maxTokens: payload.agent.max_tokens ?? 8192,
-    reasoningEffort: payload.agent.reasoning_effort ?? "",
+    temperature: activePreset?.temperature ?? payload.agent.temperature ?? 0.1,
+    maxTokens: activePreset?.max_tokens ?? payload.agent.max_tokens ?? 8192,
+    reasoningEffort: activePreset?.reasoning_effort ?? payload.agent.reasoning_effort ?? "",
     maxToolIterations: payload.agent.max_tool_iterations ?? 200,
     maxConcurrentSubagents: payload.agent.max_concurrent_subagents ?? 1,
     maxToolResultChars: payload.agent.max_tool_result_chars ?? 16_000,
@@ -851,6 +851,9 @@ export function SettingsView({
       form.model !== selectedPreset.model ||
       form.provider !== selectedProvider ||
       form.contextWindowTokens !== normalizeContextWindowTokens(selectedPreset.context_window_tokens) ||
+      form.temperature !== selectedPreset.temperature ||
+      form.maxTokens !== selectedPreset.max_tokens ||
+      form.reasoningEffort !== (selectedPreset.reasoning_effort ?? "") ||
       (!selectedPreset.is_default && form.presetLabel.trim() !== selectedPreset.label)
     );
   }, [form, settings]);
@@ -861,6 +864,27 @@ export function SettingsView({
       form.timezone !== settings.agent.timezone ||
       form.botName !== settings.agent.bot_name ||
       form.botIcon !== settings.agent.bot_icon
+    );
+  }, [form, settings]);
+
+  const behaviorDirty = useMemo(() => {
+    if (!settings) return false;
+    return (
+      form.maxToolIterations !== (settings.agent.max_tool_iterations ?? 200) ||
+      form.maxConcurrentSubagents !== (settings.agent.max_concurrent_subagents ?? 1) ||
+      form.maxToolResultChars !== (settings.agent.max_tool_result_chars ?? 16_000) ||
+      form.providerRetryMode !== (settings.agent.provider_retry_mode ?? "standard") ||
+      form.unifiedSession !== (settings.agent.unified_session ?? false) ||
+      form.sessionTtlMinutes !== (settings.agent.session_ttl_minutes ?? 0)
+    );
+  }, [form, settings]);
+
+  const memoryDirty = useMemo(() => {
+    if (!settings) return false;
+    return (
+      form.maxMessages !== (settings.agent.max_messages ?? 120) ||
+      form.consolidationRatio !== (settings.agent.consolidation_ratio ?? 0.5) ||
+      form.contextBlockLimit !== (settings.agent.context_block_limit ?? null)
     );
   }, [form, settings]);
 
@@ -1080,7 +1104,7 @@ export function SettingsView({
   };
 
   const saveBehaviorSettings = async () => {
-    if (!settings || saving) return;
+    if (!settings || !behaviorDirty || saving) return;
     setSaving(true);
     try {
       const payload = await updateSettings(token, {
@@ -1101,7 +1125,7 @@ export function SettingsView({
   };
 
   const saveMemorySettings = async () => {
-    if (!settings || saving) return;
+    if (!settings || !memoryDirty || saving) return;
     setSaving(true);
     try {
       const payload = await updateSettings(token, {
@@ -1557,6 +1581,7 @@ export function SettingsView({
               setForm={setForm}
               settings={settings}
               dirty={modelDirty}
+              behaviorDirty={behaviorDirty}
               saving={saving}
               showBrandLogos={localPrefs.brandLogos}
               providerSaving={providerSaving}
@@ -1733,6 +1758,7 @@ export function SettingsView({
             setForm={setForm}
             settings={settings}
             dirty={runtimeDirty}
+            memoryDirty={memoryDirty}
             saving={saving}
             onSave={saveRuntimeSettings}
             onSaveMemory={saveMemorySettings}
@@ -2453,6 +2479,7 @@ function ModelsSettings({
   setForm,
   settings,
   dirty,
+  behaviorDirty,
   saving,
   showBrandLogos,
   providerSaving,
@@ -2466,6 +2493,7 @@ function ModelsSettings({
   setForm: Dispatch<SetStateAction<AgentSettingsDraft>>;
   settings: SettingsPayload;
   dirty: boolean;
+  behaviorDirty: boolean;
   saving: boolean;
   showBrandLogos: boolean;
   providerSaving: string | null;
@@ -2525,6 +2553,9 @@ function ModelsSettings({
                   contextWindowTokens: normalizeContextWindowTokens(
                     nextPreset?.context_window_tokens ?? prev.contextWindowTokens,
                   ),
+                  temperature: nextPreset?.temperature ?? prev.temperature,
+                  maxTokens: nextPreset?.max_tokens ?? prev.maxTokens,
+                  reasoningEffort: nextPreset?.reasoning_effort ?? "",
                 }));
               }}
               onCreateConfiguration={onCreateConfiguration}
@@ -2690,6 +2721,7 @@ function ModelsSettings({
       <BehaviorSection
         form={form}
         setForm={setForm}
+        dirty={behaviorDirty}
         saving={saving}
         onSave={onSaveBehavior}
         tx={tx}
@@ -2701,12 +2733,14 @@ function ModelsSettings({
 function BehaviorSection({
   form,
   setForm,
+  dirty,
   saving,
   onSave,
   tx,
 }: {
   form: AgentSettingsDraft;
   setForm: Dispatch<SetStateAction<AgentSettingsDraft>>;
+  dirty: boolean;
   saving: boolean;
   onSave: () => void;
   tx: (key: string, fallback: string) => string;
@@ -2802,7 +2836,7 @@ function BehaviorSection({
               <span className="text-[12px] text-muted-foreground">min</span>
             </div>
           </SettingsRow>
-          <SettingsFooter dirty saving={saving} saved={false} onSave={onSave} />
+          <SettingsFooter dirty={dirty} saving={saving} saved={false} onSave={onSave} />
         </SettingsGroup>
       ) : null}
     </section>
@@ -6157,7 +6191,13 @@ function DreamSection({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const dirty =
+    enabled !== (dream?.enabled ?? true) ||
+    intervalH !== (dream?.interval_h ?? 2) ||
+    modelOverride.trim() !== (dream?.model_override ?? "");
+
   const save = async () => {
+    if (!dirty || saving) return;
     setSaving(true);
     try {
       const payload = await updateDreamSettings(token, {
@@ -6223,7 +6263,7 @@ function DreamSection({
         {error ? (
           <div className="px-5 py-2 text-[12px] text-destructive">{error}</div>
         ) : null}
-        <SettingsFooter dirty saving={saving} saved={false} onSave={save} />
+        <SettingsFooter dirty={dirty} saving={saving} saved={false} onSave={save} />
       </SettingsGroup>
     </section>
   );
@@ -6235,6 +6275,7 @@ function RuntimeSettings({
   setForm,
   settings,
   dirty,
+  memoryDirty,
   saving,
   onSave,
   onSaveMemory,
@@ -6248,6 +6289,7 @@ function RuntimeSettings({
   setForm: Dispatch<SetStateAction<AgentSettingsDraft>>;
   settings: SettingsPayload;
   dirty: boolean;
+  memoryDirty: boolean;
   saving: boolean;
   onSave: () => void;
   onSaveMemory: () => void;
@@ -6413,7 +6455,7 @@ function RuntimeSettings({
               />
             </div>
           </SettingsRow>
-          <SettingsFooter dirty saving={saving} saved={false} onSave={onSaveMemory} />
+          <SettingsFooter dirty={memoryDirty} saving={saving} saved={false} onSave={onSaveMemory} />
         </SettingsGroup>
       </section>
 
